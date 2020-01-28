@@ -51,7 +51,7 @@ list_of_operations = []
 def parse_bot_commands(slack_events):
     for event in slack_events:
         try:
-            if event["type"] == "message" and not "this-doesnt-exist" in event:
+            if str(event["type"]) == "message" and not "this-doesnt-exist" in event:
                 project_name, alert_threshold, operation_type, alert_type = parse_direct_mention(event["attachments"][0]["text"])
                 handle_command(project_name, alert_threshold, operation_type, alert_type)
                 return project_name, alert_threshold, operation_type, alert_type
@@ -59,7 +59,7 @@ def parse_bot_commands(slack_events):
             try:
                 currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print ("[" + currentTime + "] [*] DEBUG: " + str(event) + '\n')
-                if event["type"] == "message" and not "subtype" in event:
+                if str(event["type"]) == "message" and not "subtype" in event:
                     command = event["text"]  
                     handle_os_command(command,event["ts"],event["channel"])
                     currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")                
@@ -118,6 +118,13 @@ def parse_direct_mention(message_text):
         OPERATION_TYPE = 'null'
         return (PROJECT_NAME, ALERT_THRESHOLD, OPERATION_TYPE, ALERT_TYPE)
 
+    elif str(alert_type.group(0)) == 'k8anonymousAccess':
+        currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print('[' + currentTime + '] [*] DEBUG: k8anonymousAccess')
+        ALERT_TYPE = 'k8anonymousAccess'
+        OPERATION_TYPE = str(operation_type.group(3)).strip()
+        return (PROJECT_NAME, ALERT_THRESHOLD, OPERATION_TYPE, ALERT_TYPE)
+
 
 
     return (PROJECT_NAME, ALERT_THRESHOLD, OPERATION_TYPE)
@@ -174,8 +181,11 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
                 
                 ports_list = []
                 for methods in json_firewallRules['allowed']:
-                    for ports in methods['ports']:
-                        ports_list.append(str(methods['IPProtocol']) + str(ports))
+                    if str(methods['IPProtocol']) == 'all':
+                        ports_list.append(str(methods['IPProtocol']) + 'all')
+                    else:
+                        for ports in methods['ports']:
+                            ports_list.append(str(methods['IPProtocol']) + str(ports))
 
                 whitelisted_firewall = f_firewall.check_whitelisted_ports(ports_list)
                 if whitelisted_firewall == False:
@@ -222,7 +232,7 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
 
     
     elif alert_type == 'iamrole':
-        raw_operations = f_operations.get_iam_raw_operations()
+        raw_operations = f_operations.get_iam_raw_operations(NUM_OF_INCIDENTS)
         json_raw_operations = json.loads(raw_operations)
 
         for ops in json_raw_operations:
@@ -235,17 +245,32 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
                 member = str(actions.get('member'))
                 role =  str(actions.get('role'))
                 blacklisted_role = f_iam.check_blacklisted_roles(role)
-                if blacklisted_role == True:
+                whitelisted_domain = f_iam.check_whitelisted_domain(member)
+
+                # If the domain is not whitelisted (name@personalMail.com)
+                # Alert this
+                if whitelisted_domain == False:
                     currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print("[" + currentTime + "] [*] DEBUG: Role " + role + " is blacklisted")
+                    print("[" + currentTime + "] [*] DEBUG: Domain for " + member + " is blacklisted")
                     #send to slack
                     f_slackHelper.iamrole_slack(principalEmail,action,member,project_name,role)
                     # Push to Elasticsearch
                     json_iam = f_operations.iam_toES(principalEmail,action,member,project_name,role,now_strftime)
                     es.index(index='dollhouse', doc_type='alert_IAM', body=json_iam)
-                else:
-                    currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print("[" + currentTime + "] [*] DEBUG: Role " + role + " is not blacklisted")
+
+                else: # the domain is part of the whitelisted domain
+                    if blacklisted_role == True:
+                        currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print("[" + currentTime + "] [*] DEBUG: Role " + role + " is blacklisted")
+                        #send to slack
+                        f_slackHelper.iamrole_slack(principalEmail,action,member,project_name,role)
+                        # Push to Elasticsearch
+                        json_iam = f_operations.iam_toES(principalEmail,action,member,project_name,role,now_strftime)
+                        es.index(index='dollhouse', doc_type='alert_IAM', body=json_iam)
+                    else:
+                        currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print("[" + currentTime + "] [*] DEBUG: Role " + role + " is not blacklisted")
+
 
 
     elif alert_type == 'createKey':
@@ -281,6 +306,55 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
             json_key = f_operations.key_toES(principalEmail,'delete',accountName,project_name,now_strftime)
             es.index(index='dollhouse', doc_type='alert_serviceAccount', body=json_key)
 
+    elif alert_type == 'k8anonymousAccess':
+        if operation_type == 'create':
+            currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print("[" + currentTime + "] [*] DEBUG: k8Anonymous-Create")
+            raw_operations = os.popen("gcloud logging read 'resource.type= \"k8s_cluster\" AND protoPayload.response.subjects.name=\"system:anonymous\" AND (protoPayload.methodName=\"io.k8s.authorization.rbac.v1.clusterrolebindings.create\" OR protoPayload.authorizationInfo.permission=\"io.k8s.authorization.rbac.v1beta1.clusterrolebindings.create\")' --format=json --limit="+str(1)).read()
+
+            json_raw_operations = json.loads(raw_operations)
+
+            for ops in json_raw_operations:
+                principalEmail = str(ops.get('protoPayload').get('authenticationInfo').get('principalEmail'))
+                bindingName = str(ops.get('protoPayload').get('response').get('metadata').get('name'))
+                subjects = ops.get('protoPayload').get('response').get('subjects')
+                access = [str(item.get('name')) for item in subjects if 'anonymous' in item.get('name')][0]
+                role = str(ops.get('protoPayload').get('response').get('roleRef').get('name'))
+                clusterName = str(ops.get('resource').get('labels').get('cluster_name'))
+
+                #Send alert to slack
+                f_slackHelper.k8Anonymous_create_slack(principalEmail,bindingName,access,project_name,role,clusterName)
+                # Push to Elasticsearch
+                json_k8anonymous = f_operations.k8anonymous_toES(principalEmail,bindingName,access,project_name,role,clusterName,now_strftime)
+                es.index(index='dollhouse', doc_type='k8Anonymous', body=json_k8anonymous)
+
+
+                accountName = str(ops.get('resource').get('labels').get('email_id'))
+                print(principalEmail)
+                print(accountName)
+
+        elif operation_type == 'patch':
+            currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print("[" + currentTime + "] [*] DEBUG: k8Anonymous-Patch")
+            raw_operations = os.popen("gcloud logging read 'resource.type= \"k8s_cluster\" AND protoPayload.response.subjects.name=\"system:anonymous\" AND (protoPayload.methodName=\"io.k8s.authorization.rbac.v1.clusterrolebindings.patch\" OR protoPayload.authorizationInfo.permission=\"io.k8s.authorization.rbac.v1beta1.clusterrolebindings.patch\")' --format=json --limit="+str(1)).read()
+
+            for ops in json_raw_operations:
+                principalEmail = str(ops.get('protoPayload').get('authenticationInfo').get('principalEmail'))
+                binidngName = str(ops.get('protoPayload').get('response').get('metadata').get('name'))
+                subjects = ops.get('protoPayload').get('response').get('subjects')
+                access = [item.get('name') for item in subjects if 'anonymous' in item.get('name')][0]
+                role = str(ops.get('protoPayload').get('response').get('roleRef').get('name'))
+                clusterName = str(ops.get('resource').get('labels').get('cluster_name'))
+                #Send alert to slack
+                f_slackHelper.k8Anonymous_patch_slack(principalEmail,binidngName,access,project_name,role,clusterName)
+                # Push to Elasticsearch
+                json_k8anonymous = f_operations.k8anonymous_toES(principalEmail,binidngName,access,project_name,role,clusterName,now_strftime)
+                es.index(index='dollhouse', doc_type='k8Anonymous', body=json_k8anonymous)
+
+
+        else:
+            pass
+
     elif alert_type == 'instanceSetTag':
         currentTime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print("[" + currentTime + "] [*] DEBUG: instanceSetTag")
@@ -312,9 +386,6 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
         public_ip = f_operations.check_public_ip(resourceName, project_name)
         
         if public_ip is not '':
-            # get network tags
-            # import pdb
-            # pdb.set_trace()
             json_operations = json.loads(os.popen('gcloud compute instances describe ' + resourceName + ' --format=json').read())
             list_tags = json_operations.get('tags').get('items')
             temp_list = []
@@ -335,7 +406,7 @@ def get_operations(project_name, NUM_OF_INCIDENTS, operation_type, alert_type):
 
 if __name__ == "__main__":
     os.system("gcloud config set account " + running_account)
-    if slack_client.rtm_connect(with_team_state=False):
+    if slack_client.rtm_connect(auto_reconnect=True):
         print("dollhouse-bot connected and running!")
  
         while True:

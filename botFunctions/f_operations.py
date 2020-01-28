@@ -24,8 +24,8 @@ def get_firewall_raw_operations(operation_type,project_name,NUM_OF_INCIDENTS):
     raw_operations = os.popen('gcloud compute operations list --filter="operationType='+operation_type+ ' AND targetLink=https://www.googleapis.com/compute/v1/projects/'+project_name+'/global/firewalls/" --sort-by ~TIMESTAMP | grep -m'+str(NUM_OF_INCIDENTS + 1)+' ""').read()
     return raw_operations
 
-def get_iam_raw_operations():
-    cmd = 'gcloud logging read "resource.type=project AND protoPayload.serviceName=cloudresourcemanager.googleapis.com AND protoPayload.methodName=SetIamPolicy" --format=json'
+def get_iam_raw_operations(NUM_OF_INCIDENTS):
+    cmd = 'gcloud logging read "resource.type=project AND protoPayload.serviceName=cloudresourcemanager.googleapis.com AND protoPayload.methodName=SetIamPolicy" --format=json --limit='+str(NUM_OF_INCIDENTS)
     o = os.popen(cmd,'r')
     raw_operations = o.read()
     return raw_operations
@@ -95,3 +95,15 @@ def instanceAddAccessConfig_toES(user,resourceName,public_ip, now_strftime,proje
     json_instanceAddAccessConfig['time'] = now_strftime
     json_instanceAddAccessConfig['project_name'] = project_name
     return json_instanceSetTag
+
+def k8anonymous_toES(principalEmail,bindingName,access,project_name,role,cluster_name,now_strftime):
+    json_k8anonymous = {}
+    json_k8anonymous['user'] = principalEmail
+    json_k8anonymous['binding'] = bindingName
+    json_k8anonymous['access'] = access
+    json_k8anonymous['time'] = now_strftime
+    json_k8anonymous['project_name'] = project_name
+    json_k8anonymous['role'] = role
+    json_k8anonymous['cluster_name'] = cluster_name
+    return json_k8anonymous
+
